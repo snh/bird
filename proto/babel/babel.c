@@ -304,7 +304,7 @@ babel_add_seqno_request(struct babel_proto *p, struct babel_entry *e,
   struct babel_seqno_request *sr;
 
   WALK_LIST(sr, e->requests)
-    if (sr->router_id == router_id)
+    if (sr->router_id == router_id && sr->nbr == nbr)
     {
       /* Found matching or newer */
       if (ge_mod64k(sr->seqno, seqno) && seqno_request_valid(sr))
@@ -312,7 +312,8 @@ babel_add_seqno_request(struct babel_proto *p, struct babel_entry *e,
 
       /* Found older */
       rem_node(NODE sr);
-      rem_node(&sr->nbr_node);
+      if (sr->nbr)
+        rem_node(&sr->nbr_node);
 
       goto found;
     }
@@ -349,17 +350,20 @@ static int
 babel_satisfy_seqno_request(struct babel_proto *p, struct babel_entry *e,
 			   u64 router_id, u16 seqno)
 {
-  struct babel_seqno_request *sr;
+  struct babel_seqno_request *sr, *srx;
+  int ret = 0;
 
-  WALK_LIST(sr, e->requests)
+  WALK_LIST_DELSAFE(sr, srx, e->requests)
     if ((sr->router_id == router_id) && ge_mod64k(seqno, sr->seqno))
     {
-      /* Found the request, remove it */
+      /* Found a matching request, remove it; there may be multiple outstanding
+       * requests, so continue looping
+       */
       babel_remove_seqno_request(p, sr);
-      return 1;
+      ret = 1;
     }
 
-  return 0;
+  return ret;
 }
 
 static void

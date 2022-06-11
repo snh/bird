@@ -2049,6 +2049,11 @@ protocol babel [<name>] {
       protocol will only accept HMAC-based algorithms or one of the Blake
       algorithms, and the length of the supplied password string must match the
       key size used by the selected algorithm.
+
+      <tag><label id="babel-ipv4-via-ipv6">ipv4 via ipv6 <m/switch/</tag>
+      If enabled, Bird will accept and emit IPv4-via-IPv6 routes when IPv4
+      addresses are absent from the interface as described in draft-ietf-babel-v4viav6.
+      Default: yes.
 </descrip>
 
 <sect1>Attributes

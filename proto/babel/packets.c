@@ -175,9 +175,11 @@ struct babel_parse_state {
   u64 router_id;		/* Router ID used in subsequent updates */
   u8 def_ip6_prefix[16];	/* Implicit IPv6 prefix in network order */
   u8 def_ip4_prefix[4];		/* Implicit IPv4 prefix in network order */
+  u8 def_ip4viaip6_prefix[4];	/* Implicit IPv4 prefix in network order */
   u8 router_id_seen;		/* router_id field is valid */
   u8 def_ip6_prefix_seen;	/* def_ip6_prefix is valid */
   u8 def_ip4_prefix_seen;	/* def_ip4_prefix is valid */
+  u8 def_ip4viaip6_prefix_seen; /* def_ip4viaip6_prefix is valid*/
   u8 hello_tstamp_seen;	/* pkt contains a hello timestamp */
   u8 current_tlv_endpos;	/* End of self-terminating TLVs (offset from start) */
   u8 sadr_enabled;
@@ -468,9 +470,6 @@ babel_read_ack_req(struct babel_tlv *hdr, union babel_msg *m,
   msg->interval = get_time16(&tlv->interval);
   msg->sender = state->saddr;
 
-  if (!msg->interval)
-    return PARSE_ERROR;
-
   return PARSE_SUCCESS;
 }
 
@@ -568,13 +567,13 @@ babel_read_ihu(struct babel_tlv *hdr, union babel_msg *m,
     if (TLV_OPT_LENGTH(tlv) < 4)
       return PARSE_ERROR;
     state->current_tlv_endpos += 4;
-    break;
+    return PARSE_SUCCESS;
 
   case BABEL_AE_IP6:
     if (TLV_OPT_LENGTH(tlv) < 16)
       return PARSE_ERROR;
     state->current_tlv_endpos += 16;
-    break;
+    return PARSE_SUCCESS;
 
   case BABEL_AE_IP6_LL:
     if (TLV_OPT_LENGTH(tlv) < 8)
@@ -582,10 +581,50 @@ babel_read_ihu(struct babel_tlv *hdr, union babel_msg *m,
 
     msg->addr = ipa_from_ip6(get_ip6_ll(&tlv->addr));
     state->current_tlv_endpos += 8;
-    break;
+    return PARSE_SUCCESS;
   }
 
-  return PARSE_SUCCESS;
+  return PARSE_IGNORE;
+}
+
+/* This is called directly from babel_read_next_hop to handle the ip4 address
+   compression state */
+static int
+babel_get_ip4_prefix(struct babel_tlv_update *tlv,
+                             struct babel_msg_update *msg,
+                             u8 *def_prefix_seen,
+                             u8 (*def_prefix)[],
+                             ip_addr next_hop,
+                             int len)
+{
+    if (tlv->plen > IP4_MAX_PREFIX_LENGTH)
+      return PARSE_ERROR;
+
+    /* Cannot omit data if there is no saved prefix */
+    if (tlv->omitted && !*def_prefix_seen)
+      return PARSE_ERROR;
+
+    /* Update must have next hop, unless it is retraction */
+    if (ipa_zero(next_hop) && msg->metric != BABEL_INFINITY)
+      return PARSE_IGNORE;
+
+    /* Merge saved prefix and received prefix parts */
+    u8 buf[4] = {};
+    memcpy(buf, *def_prefix, tlv->omitted);
+    memcpy(buf + tlv->omitted, tlv->addr, len);
+
+    ip4_addr prefix4 = get_ip4(buf);
+    net_fill_ip4(&msg->net, prefix4, tlv->plen);
+
+    if (tlv->flags & BABEL_UF_DEF_PREFIX)
+    {
+      put_ip4(*def_prefix, prefix4);
+      *def_prefix_seen = 1;
+    }
+
+    msg->next_hop = next_hop;
+
+    return PARSE_SUCCESS;
 }
 
 static uint
@@ -748,6 +787,7 @@ static int
 babel_read_update(struct babel_tlv *hdr, union babel_msg *m,
                   struct babel_parse_state *state)
 {
+  int rc;
   struct babel_tlv_update *tlv = (void *) hdr;
   struct babel_msg_update *msg = &m->update;
 
@@ -758,7 +798,6 @@ babel_read_update(struct babel_tlv *hdr, union babel_msg *m,
 
   /* Length of received prefix data without omitted part */
   int len = BYTES(tlv->plen) - (int) tlv->omitted;
-  u8 buf[16] = {};
 
   if ((len < 0) || ((uint) len > TLV_OPT_LENGTH(tlv)))
     return PARSE_ERROR;
@@ -776,31 +815,20 @@ babel_read_update(struct babel_tlv *hdr, union babel_msg *m,
     break;
 
   case BABEL_AE_IP4:
-    if (tlv->plen > IP4_MAX_PREFIX_LENGTH)
-      return PARSE_ERROR;
+    rc = babel_get_ip4_prefix(tlv, msg, &state->def_ip4_prefix_seen,
+		                      &state->def_ip4_prefix, state->next_hop_ip4,
+				      len);
+    if (rc != PARSE_SUCCESS)
+      return rc;
 
-    /* Cannot omit data if there is no saved prefix */
-    if (tlv->omitted && !state->def_ip4_prefix_seen)
-      return PARSE_ERROR;
+    break;
 
-    /* Update must have next hop, unless it is retraction */
-    if (ipa_zero(state->next_hop_ip4) && (msg->metric != BABEL_INFINITY))
-      return PARSE_IGNORE;
-
-    /* Merge saved prefix and received prefix parts */
-    memcpy(buf, state->def_ip4_prefix, tlv->omitted);
-    memcpy(buf + tlv->omitted, tlv->addr, len);
-
-    ip4_addr prefix4 = get_ip4(buf);
-    net_fill_ip4(&msg->net, prefix4, tlv->plen);
-
-    if (tlv->flags & BABEL_UF_DEF_PREFIX)
-    {
-      put_ip4(state->def_ip4_prefix, prefix4);
-      state->def_ip4_prefix_seen = 1;
-    }
-
-    msg->next_hop = state->next_hop_ip4;
+  case BABEL_AE_IPV4_VIA_IPV6:
+    rc = babel_get_ip4_prefix(tlv, msg, &state->def_ip4viaip6_prefix_seen,
+				      &state->def_ip4viaip6_prefix, state->next_hop_ip6,
+				      len);
+    if (rc != PARSE_SUCCESS)
+      return rc;
 
     break;
 
@@ -813,6 +841,7 @@ babel_read_update(struct babel_tlv *hdr, union babel_msg *m,
       return PARSE_ERROR;
 
     /* Merge saved prefix and received prefix parts */
+    u8 buf[16] = {};
     memcpy(buf, state->def_ip6_prefix, tlv->omitted);
     memcpy(buf + tlv->omitted, tlv->addr, len);
 
@@ -915,7 +944,11 @@ babel_write_update(struct babel_tlv *hdr, union babel_msg *m,
   }
   else if (msg->net.type == NET_IP4)
   {
-    tlv->ae = BABEL_AE_IP4;
+    if (!ipa_zero(msg->next_hop) && ipa_is_ip6(msg->next_hop))
+      tlv->ae = BABEL_AE_IPV4_VIA_IPV6;
+    else
+      tlv->ae = BABEL_AE_IP4;
+
     tlv->plen = net4_pxlen(&msg->net);
     put_ip4_px(tlv->addr, &msg->net);
   }
@@ -983,7 +1016,15 @@ babel_read_route_request(struct babel_tlv *hdr, union babel_msg *m,
     msg->full = 1;
     return PARSE_SUCCESS;
 
+  /*
+   * When receiving requests, AEs 1 (IPv4) and 4 (v4-via-v6) MUST be
+   * treated in the same manner: the receiver processes the request as
+   * described in Section 3.8 of [RFC6126bis].  If an Update is sent, then
+   * it MAY be sent with AE 1 or 4, as described in Section 2.1 above,
+   * irrespective of which AE was used in the request.
+   */
   case BABEL_AE_IP4:
+  case BABEL_AE_IPV4_VIA_IPV6:
     if (tlv->plen > IP4_MAX_PREFIX_LENGTH)
       return PARSE_ERROR;
 
@@ -1084,7 +1125,15 @@ babel_read_seqno_request(struct babel_tlv *hdr, union babel_msg *m,
   case BABEL_AE_WILDCARD:
     return PARSE_ERROR;
 
+  /*
+   * When receiving requests, AEs 1 (IPv4) and 4 (v4-via-v6) MUST be
+   * treated in the same manner: the receiver processes the request as
+   * described in Section 3.8 of [RFC6126bis].  If an Update is sent, then
+   * it MAY be sent with AE 1 or 4, as described in Section 2.1 above,
+   * irrespective of which AE was used in the request.
+   */
   case BABEL_AE_IP4:
+  case BABEL_AE_IPV4_VIA_IPV6:
     if (tlv->plen > IP4_MAX_PREFIX_LENGTH)
       return PARSE_ERROR;
 

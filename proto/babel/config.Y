@@ -26,7 +26,7 @@ CF_KEYWORDS(BABEL, INTERFACE, METRIC, RXCOST, HELLO, UPDATE, INTERVAL, PORT,
 	TYPE, WIRED, WIRELESS, TUNNEL, RX, TX, BUFFER, PRIORITY, LENGTH, CHECK,
         LINK, NEXT, HOP, IPV4, IPV6, BABEL_METRIC, SHOW, INTERFACES, NEIGHBORS,
 	ENTRIES, RANDOMIZE, ROUTER, ID, AUTHENTICATION, NONE, MAC, PERMISSIVE,
-        RTT, MIN, MAX, DECAY, SEND, TIMESTAMPS)
+        RTT, MIN, MAX, DECAY, SEND, TIMESTAMPS, VIA)
 
 CF_GRAMMAR
 
@@ -80,6 +80,7 @@ babel_iface_start:
   BABEL_IFACE->rtt_decay = BABEL_RTT_DECAY;
   BABEL_IFACE->rtt_send = 1;
   BABEL_IFACE->check_link = 1;
+  BABEL_IFACE->ip4_via_ip6 = 1;
 };
 
 
@@ -165,6 +166,7 @@ babel_iface_item:
  | CHECK LINK bool { BABEL_IFACE->check_link = $3; }
  | NEXT HOP IPV4 ipa { BABEL_IFACE->next_hop_ip4 = $4; if (!ipa_is_ip4($4)) cf_error("Must be an IPv4 address"); }
  | NEXT HOP IPV6 ipa { BABEL_IFACE->next_hop_ip6 = $4; if (!ipa_is_ip6($4)) cf_error("Must be an IPv6 address"); }
+ | IPV4 VIA IPV6 bool { BABEL_IFACE->ip4_via_ip6 = $4; }
  | AUTHENTICATION NONE { BABEL_IFACE->auth_type = BABEL_AUTH_NONE; }
  | AUTHENTICATION MAC { BABEL_IFACE->auth_type = BABEL_AUTH_MAC; BABEL_IFACE->auth_permissive = 0; }
  | AUTHENTICATION MAC PERMISSIVE { BABEL_IFACE->auth_type = BABEL_AUTH_MAC; BABEL_IFACE->auth_permissive = 1; }
